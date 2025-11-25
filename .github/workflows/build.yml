@@ -2,13 +2,13 @@ name: Backend CI - Build & Test
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
     paths:
       - 'src/**'
       - 'pom.xml'
       - '.github/workflows/**'
   pull_request:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 jobs:
   build-jvm:
