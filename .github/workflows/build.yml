@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - 'Dockerfile'
       - '.github/workflows/**'
   pull_request:
     branches: [ "master" ]
@@ -15,47 +16,21 @@ env:
   AWS_REGION: ap-southeast-1
 
 jobs:
-  build-native:
-    name: Build Native Executable
+  build-and-push:
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
 
-      - name: Build Native Image with Maven
-        run: mvn package -Pnative -Dquarkus.native.container-build=true -DskipTests
-
-      # Lưu file thực thi để job sau dùng
-      - name: Upload Native Executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-executable
-          path: target/*-runner
-
-  push-to-ecr:
-    name: Push to AWS ECR
-    needs: build-native
-    runs-on: ubuntu-latest
-    # Chỉ chạy khi push vào master (không chạy khi pull request)
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Native Executable
-        uses: actions/download-artifact@v4
-        with:
-          name: native-executable
-          path: target/
-
-      # Cấp quyền thực thi cho file vừa tải về (quan trọng!)
-      - name: Fix permissions
-        run: chmod +x target/*-runner
+      - name: Build with Maven
+        run: mvn -B package -DskipTests
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -69,14 +44,38 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, and push image to Amazon ECR
+        if: github.event_name == 'push'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Sử dụng Dockerfile.native đã tạo
-          docker build -f src/main/docker/Dockerfile.native -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f src/main/docker/Dockerfile.jvm .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           
-          # Tag thêm là latest để dễ dev
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+  update-gitops:
+    name: Update GitOps Repo
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout GitOps Repo
+        uses: actions/checkout@v4
+        with:
+          repository: mahersavara/scoutli-gitops
+          token: ${{ secrets.GH_PAT }} # Cần tạo Secret GH_PAT
+          path: gitops
+
+      - name: Update Image Tag
+        run: |
+          cd gitops/envs/dev
+          # Sử dụng sed để thay thế tag
+          sed -i 's/tag: ".*"/tag: "${{ github.sha }}"/' backend-values.yaml
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add backend-values.yaml
+          git commit -m "chore(backend): update image tag to ${{ github.sha }}"
+          git push
